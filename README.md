@@ -86,16 +86,16 @@ tech-challenge-bovespa/
 
 - **lambda-execution-role**
 
-  - Policies:
-    - AWSLambdaBasicExecutionRole
-    - Acesso S3 (`GetObject`, `PutObject`, `ListBucket` em **raw/** e **refined/**)
+  - Políticas:
+    - `AWSLambdaBasicExecutionRole`
+    - Acesso S3 (`s3:GetObject`, `s3:PutObject`, `s3:ListBucket` em `raw/*` e `refined/*`)
     - `glue:StartJobRun` (para trigger)
 
 - **glue-service-role**
 
-  - Policies:
-    - AWSGlueServiceRole
-    - Acesso S3 (`GetObject`, `PutObject`, `ListBucket` em **raw/** e **refined/**)
+  - Políticas:
+    - `AWSGlueServiceRole`
+    - Acesso S3 (`s3:GetObject`, `s3:PutObject`, `s3:ListBucket` em `raw/*` e `refined/*`)
     - `iam:PassRole`
 
 ---
@@ -106,7 +106,7 @@ tech-challenge-bovespa/
 **Runtime:** Python 3.11\
 **Layer:** `AWSSDKPandas-Python311:7`
 
-**Env Vars:**
+**Variáveis de Ambiente:**
 
 | Nome           | Valor                    |
 | -------------- | ------------------------ |
@@ -119,59 +119,101 @@ tech-challenge-bovespa/
 **Código (**``**):**
 
 ```python
-import os, json, base64, logging
+import os
+import json
+import base64
+import logging
 from datetime import datetime
-import requests, pandas as pd, boto3
+import requests
+import pandas as pd
+import boto3
 
-logger = logging.getLogger(); logger.setLevel(logging.INFO)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
 S3_BUCKET   = os.environ['S3_BUCKET']
-SEGMENT     = os.environ.get('SEGMENT','2')
-PAGE_SIZE   = int(os.environ.get('PAGE_SIZE',1000))
-HTTP_TIMEOUT= int(os.environ.get('HTTP_TIMEOUT',15))
-FILENAME    = os.environ.get('FILENAME','ibov_setor.parquet')
+SEGMENT     = os.environ.get('SEGMENT', '2')
+PAGE_SIZE   = int(os.environ.get('PAGE_SIZE', 1000))
+HTTP_TIMEOUT= int(os.environ.get('HTTP_TIMEOUT', 15))
+FILENAME    = os.environ.get('FILENAME', 'ibov_setor.parquet')
+
 
 def fetch_ibov_por_setor(segment, page_size, timeout):
     page, all_rows, data_date = 1, [], None
     session = requests.Session()
+
     while True:
-        payload = {"language":"pt-br","pageNumber":page,"pageSize":page_size,"index":"IBOV","segment":segment}
-        enc = base64.b64encode(json.dumps(payload,ensure_ascii=False).encode()).decode()
-        url = f"https://sistemaswebb3-listados.b3.com.br/indexProxy/indexCall/GetPortfolioDay/{enc}"
-        r = session.get(url, timeout=timeout); r.raise_for_status()
-        j = r.json()
+        payload = {
+            'language': 'pt-br',
+            'pageNumber': page,
+            'pageSize': page_size,
+            'index': 'IBOV',
+            'segment': segment
+        }
+        encoded = base64.b64encode(
+            json.dumps(payload, ensure_ascii=False).encode('utf-8')
+        ).decode('utf-8')
+        url = f"https://sistemaswebb3-listados.b3.com.br/indexProxy/indexCall/GetPortfolioDay/{encoded}"
+
+        resp = session.get(url, timeout=timeout)
+        resp.raise_for_status()
+        data = resp.json()
+
         if data_date is None:
-            ds = j.get("header",{}).get("date")
-            data_date = datetime.strptime(ds,"%d/%m/%y").date()
-        results = j.get("results",[])
-        if not results: break
+            date_str = data.get('header', {}).get('date')
+            data_date = datetime.strptime(date_str, '%d/%m/%y').date()
+
+        results = data.get('results', [])
+        if not results:
+            break
+
         all_rows.extend(results)
-        if len(results)<page_size: break
+        if len(results) < page_size:
+            break
+
         page += 1
 
     df = pd.DataFrame(all_rows)
-    df["DataCarteira"] = data_date
-    for c in ("part","partAcum"):
-        if c in df: df[c] = df[c].str.replace(",",".").astype(float)
-    if "theoricalQty" in df:
-        df["theoricalQty"] = (
-            df["theoricalQty"].astype(str)
-                .str.replace(".", "", regex=False)
-                .astype(float)
-        )
+    df['DataCarteira'] = data_date
+
+    for col in ['part', 'partAcum']:
+        if col in df.columns:
+            df[col] = df[col].str.replace(',', '.').astype(float)
+
+    if 'theoricalQty' in df.columns:
+        df['theoricalQty'] = df['theoricalQty'] \
+            .astype(str) \
+            .str.replace('.', '', regex=False) \
+            .astype(float)
+
     return df
+
 
 def lambda_handler(event, context):
     try:
         df = fetch_ibov_por_setor(SEGMENT, PAGE_SIZE, HTTP_TIMEOUT)
-        partition = df["DataCarteira"].iloc[0].strftime("date=%Y-%m-%d")
-        key = f"raw/{partition}/{FILENAME}"
-        local = f"/tmp/{FILENAME}"
-        df.to_parquet(local, index=False, compression="snappy")
-        boto3.client("s3").upload_file(local, S3_BUCKET, key)
-        return {"statusCode":200,"body":json.dumps({"s3_uri":f"s3://{S3_BUCKET}/{key}"})}
+        partition = df['DataCarteira'].iloc[0].strftime('date=%Y-%m-%d')
+        s3_key = f"raw/{partition}/{FILENAME}"
+
+        local_path = f"/tmp/{FILENAME}"
+        df.to_parquet(local_path, index=False, compression='snappy')
+
+        boto3.client('s3').upload_file(local_path, S3_BUCKET, s3_key)
+
+        return {
+            'statusCode': 200,
+            'body': json.dumps({
+                'message': 'Parquet gerado e enviado com sucesso.',
+                's3_uri': f's3://{S3_BUCKET}/{s3_key}'
+            })
+        }
+
     except Exception as e:
-        logger.exception("Falha ingestão")
-        return {"statusCode":500,"body":json.dumps({"error":str(e)})}
+        logger.exception('Falha na ingestão')
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
 ```
 
 ---
@@ -181,7 +223,7 @@ def lambda_handler(event, context):
 No **S3 → Bucket raw → Properties → Event notifications → Create Event Notification**:
 
 - **Name:** `trigger-lambda-glue-job`
-- **Event types:** All object create events
+- **Event types:** `All object create events`
 - **Prefix:** `raw/`
 - **Destination:** Lambda function `lambda_trigger_glue_job`
 
@@ -193,20 +235,32 @@ No **S3 → Bucket raw → Properties → Event notifications → Create Event N
 **Runtime:** Python 3.11
 
 ```python
-import os, json, logging, boto3
+import os
+import json
+import logging
+import boto3
 
-logger = logging.getLogger(); logger.setLevel(logging.INFO)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 GLUE_JOB = os.environ['GLUE_JOB_NAME']
+
 
 def lambda_handler(event, context):
     try:
-        response = boto3.client("glue").start_job_run(JobName=GLUE_JOB)
-        job_id = response["JobRunId"]
+        client = boto3.client('glue')
+        response = client.start_job_run(JobName=GLUE_JOB)
+        job_id = response['JobRunId']
         logger.info(f"Glue Job iniciado: {job_id}")
-        return {"statusCode":200,"body":json.dumps({"job_run_id":job_id})}
+        return {
+            'statusCode': 200,
+            'body': json.dumps({'job_run_id': job_id})
+        }
     except Exception as e:
-        logger.exception("Falha Glue trigger")
-        return {"statusCode":500,"body":json.dumps({"error":str(e)})}
+        logger.exception('Falha ao iniciar Glue Job')
+        return {
+            'statusCode': 500,
+            'body': json.dumps({'error': str(e)})
+        }
 ```
 
 ---
@@ -214,7 +268,7 @@ def lambda_handler(event, context):
 ## Glue Studio – ETL Visual
 
 1. **Source**
-   - S3 raw (`s3://<bucket>/raw/`), recursive, format **Parquet**, infer schema.
+   - S3 raw (`s3://<bucket>/raw/`), **Recursive**, format **Parquet**, infer schema.
 2. **Aggregate**
    - Group by: `segment`, `DataCarteira`
    - Sum(`part`) → `soma_part`
@@ -222,7 +276,100 @@ def lambda_handler(event, context):
    - Sum(`theoricalQty`) → `soma_qtd_teorica`
 3. **ApplyMapping**
    - `segment` → `Setor`
-   - `DataCarta`
+   - `DataCarteira` → `Data`
+   - `soma_part`, `total_codigo`, `soma_qtd_teorica` (tipos ajustados)
+4. **SQL Query**
+   ```sql
+   SELECT
+     Setor,
+     Data,
+     soma_part,
+     total_codigo,
+     soma_qtd_teorica,
+     DATEDIFF(CURRENT_DATE(), Data) AS dias_desde_carteira
+   FROM myDataSource;
+   ```
+5. **Target**
+   - S3 refined (`parquet`), partition keys: `Data`, `Setor`
+   - Enable **Create tables in Glue Data Catalog** → Database `default`, Table `tb_ibov_refined`
 
+---
+
+## Athena & Visualizações
+
+### Queries de Exemplo
+
+```sql
+-- 10 primeiros registros\SELECT * FROM default.tb_ibov_refined LIMIT 10;
+
+-- Soma total de participação\SELECT SUM(soma_part) AS total_participacao FROM default.tb_ibov_refined;
+
+-- Participação por setor
+SELECT setor, SUM(soma_part) AS total_part
+FROM default.tb_ibov_refined
+GROUP BY setor
+ORDER BY total_part DESC;
 ```
+
+### Notebook Spark
+
+```sql
+%%sql
+SELECT
+  Setor,
+  SUM(soma_part) AS total_participacao
+FROM default.tb_ibov_refined
+GROUP BY Setor
+ORDER BY total_participacao DESC
+LIMIT 10;
 ```
+
+Clique em **Visualize** (📊) ou use:
+
+```python
+df = spark.sql("...sua query...")
+pdf = df.toPandas()
+import matplotlib.pyplot as plt
+plt.figure(figsize=(10,5))
+plt.bar(pdf['Setor'], pdf['total_participacao'])
+%matplot plt
+```
+
+---
+
+## Agendamento Opcional
+
+No **EventBridge → Rules → Create Rule**:
+
+- Schedule expression: `rate(1 day)` ou
+- Cron expression: `cron(0 10 * * ? *)` (diário às 10:00 UTC)
+- Target: Lambda `lambda_ingestao_bovespa_raw`
+
+---
+
+## Ambiente & Variáveis
+
+| Variável        | Descrição                                | Valor Exemplo                  |
+| --------------- | ---------------------------------------- | ------------------------------ |
+| `S3_BUCKET`     | Bucket S3 para raw/ e refined/           | `tech-challenge-bovespa`       |
+| `SEGMENT`       | Segmento IBOV na API                     | `2`                            |
+| `PAGE_SIZE`     | Tamanho da página na API                 | `1000`                         |
+| `HTTP_TIMEOUT`  | Timeout em segundos para requisição HTTP | `15`                           |
+| `FILENAME`      | Nome do arquivo Parquet                  | `ibov_setor.parquet`           |
+| `GLUE_JOB_NAME` | Nome do Glue Job de refinamento          | `glue_job_refinamento_bovespa` |
+
+---
+
+## Monitoramento
+
+- **CloudWatch Logs**: Monitore logs das Lambdas e do Glue Job.
+- **CloudWatch Alarms**: Configure alarmes para falhas de execução.
+
+---
+
+## Próximos Passos
+
+- **CI/CD**: Deploy automatizado com AWS CDK ou CloudFormation.
+- **Data Quality**: Validar dados usando AWS Deequ ou Glue DataBrew.
+- **Dashboards**: Criar painéis no QuickSight ou Grafana.
+
