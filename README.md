@@ -79,24 +79,10 @@ Este projeto implementa um pipeline completo para:
 ```text
 tech-challenge-bovespa/
 ├── raw/       # Parquet raw particionado (date=YYYY-MM-DD)
-└── refined/   # Parquet refinado particionado (date=…/Setor=…)
+└── refined/   # Parquet refinado particionado (date=…/Codigo=…)
 ```
 
-### IAM Roles
 
-- **lambda-execution-role**
-
-  - Políticas:
-    - `AWSLambdaBasicExecutionRole`
-    - Acesso S3 (`s3:GetObject`, `s3:PutObject`, `s3:ListBucket` em `raw/*` e `refined/*`)
-    - `glue:StartJobRun` (para trigger)
-
-- **glue-service-role**
-
-  - Políticas:
-    - `AWSGlueServiceRole`
-    - Acesso S3 (`s3:GetObject`, `s3:PutObject`, `s3:ListBucket` em `raw/*` e `refined/*`)
-    - `iam:PassRole`
 
 ---
 
@@ -111,10 +97,6 @@ tech-challenge-bovespa/
 | Nome           | Valor                    |
 | -------------- | ------------------------ |
 | `S3_BUCKET`    | `tech-challenge-bovespa` |
-| `SEGMENT`      | `2`                      |
-| `PAGE_SIZE`    | `1000`                   |
-| `HTTP_TIMEOUT` | `15`                     |
-| `FILENAME`     | `ibov_setor.parquet`     |
 
 **Código (**``**):**
 
@@ -122,98 +104,115 @@ tech-challenge-bovespa/
 import os
 import json
 import base64
-import logging
-from datetime import datetime
 import requests
 import pandas as pd
+from datetime import datetime
 import boto3
 
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# Nome do bucket S3 definido nas variáveis de ambiente
+S3_BUCKET = os.environ.get('S3_BUCKET')
+if not S3_BUCKET:
+    raise RuntimeError("Variável de ambiente 'S3_BUCKET' não definida.")
 
-S3_BUCKET   = os.environ['S3_BUCKET']
-SEGMENT     = os.environ.get('SEGMENT', '2')
-PAGE_SIZE   = int(os.environ.get('PAGE_SIZE', 1000))
-HTTP_TIMEOUT= int(os.environ.get('HTTP_TIMEOUT', 15))
-FILENAME    = os.environ.get('FILENAME', 'ibov_setor.parquet')
+# Nome do arquivo Parquet a ser gerado
+FILENAME = "ibov_setor2.parquet"
 
-
-def fetch_ibov_por_setor(segment, page_size, timeout):
-    page, all_rows, data_date = 1, [], None
-    session = requests.Session()
+def fetch_ibov_por_setor(segment: str = "2", page_size: int = 1000) -> pd.DataFrame:
+    """
+    Faz scraping paginado dos dados IBOV por setor, retorna DataFrame com:
+      - part (float)
+      - partAcum (float)
+      - theoricalQty (float)
+      - DataCarteira (date)
+      - demais colunas originais
+    """
+    page = 1
+    all_rows = []
+    data_carteira = None
 
     while True:
         payload = {
-            'language': 'pt-br',
-            'pageNumber': page,
-            'pageSize': page_size,
-            'index': 'IBOV',
-            'segment': segment
+            "language": "pt-br",
+            "pageNumber": page,
+            "pageSize": page_size,
+            "index": "IBOV",
+            "segment": segment
         }
+        # Codifica o payload em Base64 para a chamada da API
         encoded = base64.b64encode(
-            json.dumps(payload, ensure_ascii=False).encode('utf-8')
-        ).decode('utf-8')
+            json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        ).decode("utf-8")
         url = f"https://sistemaswebb3-listados.b3.com.br/indexProxy/indexCall/GetPortfolioDay/{encoded}"
-
-        resp = session.get(url, timeout=timeout)
+        
+        resp = requests.get(url, timeout=15)
         resp.raise_for_status()
         data = resp.json()
 
-        if data_date is None:
-            date_str = data.get('header', {}).get('date')
-            data_date = datetime.strptime(date_str, '%d/%m/%y').date()
+        if data_carteira is None:
+            date_str = data["header"].get("date")
+            if not date_str:
+                raise ValueError(f"Header sem campo 'date': {data['header']}")
+            data_carteira = datetime.strptime(date_str, "%d/%m/%y").date()
 
-        results = data.get('results', [])
+        results = data.get("results", [])
         if not results:
             break
 
         all_rows.extend(results)
         if len(results) < page_size:
             break
-
         page += 1
 
+    # Constrói DataFrame
     df = pd.DataFrame(all_rows)
-    df['DataCarteira'] = data_date
+    df["DataCarteira"] = data_carteira
 
-    for col in ['part', 'partAcum']:
+    # Converte percentuais (vírgula → ponto) e transforma em float
+    for col in ["part", "partAcum"]:
         if col in df.columns:
-            df[col] = df[col].str.replace(',', '.').astype(float)
+            df[col] = df[col].str.replace(",", ".").astype(float)
 
-    if 'theoricalQty' in df.columns:
-        df['theoricalQty'] = df['theoricalQty'] \
-            .astype(str) \
-            .str.replace('.', '', regex=False) \
-            .astype(float)
+    # Converte theoricalQty (string com pontos de milhar) para float
+    if "theoricalQty" in df.columns:
+        df["theoricalQty"] = (
+            df["theoricalQty"]
+              .astype(str)
+              .str.replace(".", "", regex=False)  # remove separador de milhar
+              .astype(float)
+        )
 
     return df
 
-
 def lambda_handler(event, context):
-    try:
-        df = fetch_ibov_por_setor(SEGMENT, PAGE_SIZE, HTTP_TIMEOUT)
-        partition = df['DataCarteira'].iloc[0].strftime('date=%Y-%m-%d')
-        s3_key = f"raw/{partition}/{FILENAME}"
+    """
+    Handler da AWS Lambda:
+      1. Busca dados via fetch_ibov_por_setor()
+      2. Gera Parquet particionado por data
+      3. Envia o arquivo para o bucket S3
+    """
+    # 1) Obter DataFrame com os dados
+    df = fetch_ibov_por_setor(segment="2", page_size=1000)
 
-        local_path = f"/tmp/{FILENAME}"
-        df.to_parquet(local_path, index=False, compression='snappy')
+    # 2) Definir partição diária no formato date=YYYY-MM-DD
+    partition = df["DataCarteira"].iloc[0].strftime("date=%Y-%m-%d")
+    s3_key = f"raw/{partition}/{FILENAME}"
 
-        boto3.client('s3').upload_file(local_path, S3_BUCKET, s3_key)
+    # 3) Salvar localmente e enviar ao S3
+    local_path = f"/tmp/{FILENAME}"
+    df.to_parquet(local_path, index=False, compression="snappy")
 
-        return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'message': 'Parquet gerado e enviado com sucesso.',
-                's3_uri': f's3://{S3_BUCKET}/{s3_key}'
-            })
-        }
+    s3 = boto3.client("s3")
+    s3.upload_file(local_path, S3_BUCKET, s3_key)
 
-    except Exception as e:
-        logger.exception('Falha na ingestão')
-        return {
-            'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
-        }
+    # 4) Resposta de sucesso
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "message": "Parquet gerado e enviado ao S3 com sucesso.",
+            "records": len(df),
+            "s3_uri": f"s3://{S3_BUCKET}/{s3_key}"
+        })
+    }
 ```
 
 ---
@@ -242,24 +241,35 @@ import boto3
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
-GLUE_JOB = os.environ['GLUE_JOB_NAME']
 
+GLUE_JOB_NAME = os.environ.get("GLUE_JOB_NAME")
+if not GLUE_JOB_NAME:
+    logger.error("Variável de ambiente 'GLUE_JOB_NAME' não definida.")
+    raise RuntimeError("Variável de ambiente 'GLUE_JOB_NAME' não definida.")
 
 def lambda_handler(event, context):
     try:
-        client = boto3.client('glue')
-        response = client.start_job_run(JobName=GLUE_JOB)
-        job_id = response['JobRunId']
-        logger.info(f"Glue Job iniciado: {job_id}")
+        glue = boto3.client("glue")
+        response = glue.start_job_run(JobName=GLUE_JOB_NAME)
+        job_run_id = response.get("JobRunId")
+        logger.info(f"Glue job '{GLUE_JOB_NAME}' iniciado: {job_run_id}")
+
         return {
-            'statusCode': 200,
-            'body': json.dumps({'job_run_id': job_id})
+            "statusCode": 200,
+            "body": json.dumps({
+                "message": "Glue job iniciado com sucesso.",
+                "job_run_id": job_run_id
+            })
         }
+
     except Exception as e:
-        logger.exception('Falha ao iniciar Glue Job')
+        logger.exception("Erro ao iniciar Glue job")
         return {
-            'statusCode': 500,
-            'body': json.dumps({'error': str(e)})
+            "statusCode": 500,
+            "body": json.dumps({
+                "message": "Falha ao iniciar Glue job.",
+                "error": str(e)
+            })
         }
 ```
 
@@ -290,7 +300,7 @@ def lambda_handler(event, context):
    FROM myDataSource;
    ```
 5. **Target**
-   - S3 refined (`parquet`), partition keys: `Data`, `Setor`
+   - S3 refined (`parquet`), partition keys: `Data`, `Codigo`
    - Enable **Create tables in Glue Data Catalog** → Database `default`, Table `tb_ibov_refined`
 
 ---
@@ -336,40 +346,4 @@ plt.bar(pdf['Setor'], pdf['total_participacao'])
 ```
 
 ---
-
-## Agendamento Opcional
-
-No **EventBridge → Rules → Create Rule**:
-
-- Schedule expression: `rate(1 day)` ou
-- Cron expression: `cron(0 10 * * ? *)` (diário às 10:00 UTC)
-- Target: Lambda `lambda_ingestao_bovespa_raw`
-
----
-
-## Ambiente & Variáveis
-
-| Variável        | Descrição                                | Valor Exemplo                  |
-| --------------- | ---------------------------------------- | ------------------------------ |
-| `S3_BUCKET`     | Bucket S3 para raw/ e refined/           | `tech-challenge-bovespa`       |
-| `SEGMENT`       | Segmento IBOV na API                     | `2`                            |
-| `PAGE_SIZE`     | Tamanho da página na API                 | `1000`                         |
-| `HTTP_TIMEOUT`  | Timeout em segundos para requisição HTTP | `15`                           |
-| `FILENAME`      | Nome do arquivo Parquet                  | `ibov_setor.parquet`           |
-| `GLUE_JOB_NAME` | Nome do Glue Job de refinamento          | `glue_job_refinamento_bovespa` |
-
----
-
-## Monitoramento
-
-- **CloudWatch Logs**: Monitore logs das Lambdas e do Glue Job.
-- **CloudWatch Alarms**: Configure alarmes para falhas de execução.
-
----
-
-## Próximos Passos
-
-- **CI/CD**: Deploy automatizado com AWS CDK ou CloudFormation.
-- **Data Quality**: Validar dados usando AWS Deequ ou Glue DataBrew.
-- **Dashboards**: Criar painéis no QuickSight ou Grafana.
 
