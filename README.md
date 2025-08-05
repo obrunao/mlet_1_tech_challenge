@@ -1,6 +1,6 @@
 # 🚀 Pipeline Batch Bovespa
 
-> Ingestão, ETL e consumo de dados do IBOV da B3 na AWS
+> Ingestão, ETL e consumo de dados do IBOV (Índice Bovespa) da B3 na AWS
 
 ---
 
@@ -10,16 +10,14 @@
 2. [Arquitetura](#arquitetura)
 3. [Componentes](#componentes)
 4. [Configuração](#configuração)
-   - [S3 Buckets](#s3-buckets)
+   - [Buckets S3](#buckets-s3)
+   - [Papéis IAM](#papéis-iam)
    - [Lambda de Ingestão (Raw)](#lambda-de-ingestão-raw)
    - [Event Notification](#event-notification)
-   - [Lambda Trigger Glue](#lambda-trigger-glue)
+   - [Lambda de Disparo do Glue](#lambda-de-disparo-do-glue)
    - [Glue Studio – ETL Visual](#glue-studio–etl-visual)
-   - [Athena & Visualizações](#athena--visualizações)
-5. [Ambiente & Variáveis](#ambiente--variáveis)
-6. [Queries de Exemplo](#queries-de-exemplo)
-7. [Monitoramento](#monitoramento)
-8. [Próximos Passos](#próximos-passos)
+   - [Athena e Visualizações](#athena-e-visualizações)
+5. [Queries de Exemplo](#queries-de-exemplo)
 
 ---
 
@@ -28,36 +26,36 @@
 Este projeto implementa um pipeline completo para:
 
 - **Scraping** dos dados do IBOV (B3)
-- Armazenar raw em **Parquet** particionado no **S3**
-- Orquestrar via **Lambda → Glue**
-- Refinar dados no **Glue Studio (modo visual)**
-- Publicar no **Glue Catalog**
-- Consumir e visualizar no **Athena**
+- Armazenar dados brutos em **Parquet** particionado no **S3**
+- Orquestração via **Lambda → Glue**
+- Refinamento no **Glue Studio (modo visual)**
+- Publicação no **Glue Data Catalog**
+- Consumo e visualização no **Athena**
 
 ## Arquitetura
 
 1. 🌐 **API B3**
-2. 🟡 **LambdaScraperFiap\_Ingestão** → S3 `raw/`
-3. 🟡 **Lambda\_Start\_Glue\_Job** → **Glue Studio**
-4. 🔵 **Glue ETL** → S3 `refined/` + **Glue Catalog**
-5. 📗 **Athena** (Query & Notebook)
+2. 🟡 **LambdaScraperFiap_Ingestão** → S3 `raw/`
+3. 🟡 **Lambda_Start_Glue_Job** → **Glue Studio**
+4. 🔵 **Glue ETL** → S3 `refined/` + **Glue Data Catalog**
+5. 📗 **Athena** (Consultas e Notebook)
 
 ## Componentes
 
 | Componente                | Função                                                  |
 | ------------------------- | ------------------------------------------------------- |
-| **Lambda\_Ingestão**      | Scraping + upload Parquet raw                           |
+| **Lambda_Ingestão**       | Scraping e upload de Parquet raw                        |
 | **S3 raw/**               | Armazena dados brutos em Parquet particionado por data  |
-| **Event Notification**    | Dispara Lambda de trigger ao criar objetos em `raw/`    |
-| **Lambda\_Trigger\_Glue** | Inicia o Glue Job de refinamento                        |
-| **Glue Studio (ETL)**     | Transformações A, B e C + grava Parquet refinado        |
-| **S3 refined/**           | Armazena dados refinados particionados por data e setor |
-| **Glue Data Catalog**     | Tabela `default.tb_ibov_refined` criada/atualizada      |
-| **AWS Athena**            | Consulta SQL, criação de views e notebooks com gráficos |
+| **Event Notification**    | Dispara Lambda ao criar objetos em `raw/`               |
+| **Lambda_Disparo_Glue**   | Inicia Glue Job de refinamento                          |
+| **Glue Studio (ETL)**     | Transformações (Agregação, Mapeamento, SQL)             |
+| **S3 refined/**           | Armazena dados refinados particionados por Data e Código|
+| **Glue Data Catalog**     | Tabela `default.tb_ibov_refined`                        |
+| **AWS Athena**            | Consultas SQL e notebooks com visualizações             |
 
 ## Configuração
 
-### S3 Buckets
+### Buckets S3
 
 ```text
 tech-challenge-bovespa/
@@ -65,17 +63,21 @@ tech-challenge-bovespa/
 └── refined/   # Parquet refinado particionado (Data=…/Codigo=…)
 ```
 
+### Papéis IAM
+
+Papéis necessários para Lambda, Glue e Athena com permissões adequadas de leitura e escrita no S3 e no Glue Data Catalog.
+
 ### Lambda de Ingestão (Raw)
 
-**Função:** `LambdaScraperFiap`\
-**Runtime:** Python 3.11\
+**Função:** `LambdaScraperFiap`  
+**Runtime:** Python 3.11  
 **Layer:** `AWSSDKPandas-Python311:7`
 
 **Variáveis de Ambiente:**
 
 | Nome       | Valor                    |
 | ---------- | ------------------------ |
-| S3\_BUCKET | `boves-dados-fiap` |
+| S3_BUCKET  | `tech-challenge-bovespa` |
 
 ```python
 import os
@@ -194,16 +196,16 @@ def lambda_handler(event, context):
 
 ### Event Notification
 
-No **S3 → Bucket raw → Properties → Event notifications → Create Event Notification**:
+No console do S3, em **Propriedades → Event notifications → Create event notification**:
 
-- **Name:** `lambda_start_glue_job`
-- **Event types:** `All object create events`
-- **Prefix:** `raw/`
-- **Destination:** Lambda function `lambda_start_glue_job`
+- **Name:** `lambda_start_glue_job`  
+- **Event types:** `All object create events`  
+- **Prefix:** `raw/`  
+- **Destination:** Função Lambda `lambda_start_glue_job`
 
-### Lambda Trigger Glue
+### Lambda de Disparo do Glue
 
-**Função:** `lambda_start_glue_job`\
+**Função:** `lambda_start_glue_job`  
 **Runtime:** Python 3.11
 
 ```python
@@ -248,48 +250,45 @@ def lambda_handler(event, context):
 
 ### Glue Studio – ETL Visual
 
-1. **Source**
+1. **Fonte**  
+   - S3 raw (`s3://<bucket>/raw/`), recursivo, formato Parquet, inferir schema.
 
-   - S3 raw (`s3://<bucket>/raw/`), **Recursive**, format **Parquet**, infer schema.
+2. **Transformação A: Agregação**  
+   - **Campos para agrupar (group by):** `cod`, `DataCarteira`  
+   - **Campo a agregar:** `part` → soma  
+   - **Campo a agregar:** `theoricalQty` → soma  
 
-2. **Transform A: Aggregate**
+   *Visão da configuração do nó Agregação.*
 
-   - **Fields to group by (optional):** `cod`, `DataCarteira`
-   - **Field to aggregate:** `part` → **sum**
-   - **Field to aggregate:** `theoricalQty` → **sum**
+3. **Transformação B: Aplicar Mapeamento**  
+   - Mapear colunas:
 
-   &#x20;*Visão da tela de configuração do nó Aggregate (Glue Studio).*
+     | Chave de origem       | Chave de destino     | Tipo de dado |
+     | --------------------- | -------------------- | ------------ |
+     | `cod`                 | `codigo`             | string       |
+     | `DataCarteira`        | `data`               | date         |
+     | `sum(part)`           | `soma_part`          | double       |
+     | `sum(theoricalQty)`   | `soma_qtd_teorica`   | double       |
 
-3. **Transform B: Change Schema (Apply mapping)**
+   *Visão da configuração de Apply mapping.*
 
-   - Mapear colunas de acordo com padrão:
-     | Source key          | Target key         | Data type |
-     | ------------------- | ------------------ | --------- |
-     | `cod`               | `codigo`           | string    |
-     | `DataCarteira`      | `data`             | date      |
-     | `sum(part)`         | `soma_part`        | double    |
-     | `sum(theoricalQty)` | `soma_qtd_teorica` | double    |
-
-   &#x20;*Tela de Apply mapping com nomes e tipos ajustados.*
-
-4. **Transform C: SQL Query**
+4. **Transformação C: Consulta SQL**  
 
    ```sql
    SELECT
-   codigo,
-   data               AS data_carteira,
-   soma_part,
-   soma_qtd_teorica,
-   DATEDIFF(current_date(), data) AS dias_desde_carteira
-   FROM myDataSource
+     codigo               AS Codigo,
+     data                 AS DataCarteira,
+     soma_part            AS SomaPart,
+     soma_qtd_teorica     AS SomaQtdTeorica,
+     DATEDIFF(CURRENT_DATE(), data) AS dias_desde_carteira
+   FROM myDataSource;
    ```
 
-5. **Target**
+5. **Destino**  
+   - S3 refined (formato Parquet), chaves de partição: `Data`, `Codigo`  
+   - Habilitar **Create tables in Glue Data Catalog** → Database `default`, Table `tb_ibov_refined`
 
-   - S3 refined (`parquet`), partition keys: `Data`, `Codigo`
-   - Enable **Create tables in Glue Data Catalog** → Database `default`, Table `tb_ibov_refined`
-
-### Athena & Visualizações
+### Athena e Visualizações
 
 #### Queries de Exemplo
 
@@ -298,10 +297,6 @@ def lambda_handler(event, context):
 SELECT * FROM default.tb_ibov_refined LIMIT 10;
 ```
 
-%matplotlib inline
-
-```python
-# Notebook Athena: gerar gráficos com matplotlib
-```
+Em um notebook Athena, usar `%matplotlib inline` e matplotlib para gerar gráficos a partir dos resultados.
 
 
