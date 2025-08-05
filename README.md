@@ -58,7 +58,7 @@ Este projeto implementa um pipeline completo para:
 ### Buckets S3
 
 ```text
-tech-challenge-bovespa/
+bovespa-dados-fiap/
 ├── raw/       # Parquet raw particionado (date=YYYY-MM-DD)
 └── refined/   # Parquet refinado particionado (Data=…/Codigo=…)
 ```
@@ -77,7 +77,7 @@ Papéis necessários para Lambda, Glue e Athena com permissões adequadas de lei
 
 | Nome       | Valor                    |
 | ---------- | ------------------------ |
-| S3_BUCKET  | `tech-challenge-bovespa` |
+| S3_BUCKET  | `bovespa-dados-fiap` |
 
 ```python
 import os
@@ -207,6 +207,12 @@ No console do S3, em **Propriedades → Event notifications → Create event not
 
 **Função:** `lambda_start_glue_job`  
 **Runtime:** Python 3.11
+
+**Variáveis de Ambiente:**
+
+| Nome       | Valor                    |
+| ---------- | ------------------------ |
+| GLUE_JOB_NAME  | `glue_job_refined_bovespa` |
 
 ```python
 import os
