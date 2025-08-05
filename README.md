@@ -66,10 +66,6 @@ tech-challenge-bovespa/
 └── refined/   # Parquet refinado particionado (Data=…/Codigo=…)
 ```
 
-### IAM Roles
-
-*(Roles necessárias para Lambda, Glue e Athena com permissões de leitura/escrita em S3 e Glue Catalog.)*
-
 ### Lambda de Ingestão (Raw)
 
 **Função:** `LambdaScraperFiap`\
@@ -80,7 +76,7 @@ tech-challenge-bovespa/
 
 | Nome       | Valor                    |
 | ---------- | ------------------------ |
-| S3\_BUCKET | `tech-challenge-bovespa` |
+| S3\_BUCKET | `boves-dados-fiap` |
 
 ```python
 import os
