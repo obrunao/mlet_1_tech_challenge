@@ -11,7 +11,6 @@
 3. [Componentes](#componentes)
 4. [Configuração](#configuração)
    - [S3 Buckets](#s3-buckets)
-   - [IAM Roles](#iam-roles)
    - [Lambda de Ingestão (Raw)](#lambda-de-ingestão-raw)
    - [Event Notification](#event-notification)
    - [Lambda Trigger Glue](#lambda-trigger-glue)
