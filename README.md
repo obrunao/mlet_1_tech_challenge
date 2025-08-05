@@ -305,4 +305,3 @@ SELECT * FROM default.tb_ibov_refined LIMIT 10;
 
 Em um notebook Athena, usar `%matplotlib inline` e matplotlib para gerar gráficos a partir dos resultados.
 
-
