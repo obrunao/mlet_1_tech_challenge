@@ -4,13 +4,6 @@
 
 ---
 
-\
-\
-\
-
-
----
-
 ## 📖 Sumário
 
 1. [Visão Geral](#visão-geral)
@@ -22,9 +15,8 @@
    - [Lambda de Ingestão (Raw)](#lambda-de-ingestão-raw)
    - [Event Notification](#event-notification)
    - [Lambda Trigger Glue](#lambda-trigger-glue)
-   - [Glue Studio – ETL Visual](#glue-studio--etl-visual)
+   - [Glue Studio – ETL Visual](#glue-studio–etl-visual)
    - [Athena & Visualizações](#athena--visualizações)
-   - [Agendamento Opcional](#agendamento-opcional)
 5. [Ambiente & Variáveis](#ambiente--variáveis)
 6. [Queries de Exemplo](#queries-de-exemplo)
 7. [Monitoramento](#monitoramento)
@@ -43,19 +35,13 @@ Este projeto implementa um pipeline completo para:
 - Publicar no **Glue Catalog**
 - Consumir e visualizar no **Athena**
 
----
-
 ## Arquitetura
 
-
-
 1. 🌐 **API B3**
-2. 🟡 **Lambda\_Ingestão** → S3 `raw/`
-3. 🟡 **Lambda\_Trigger\_Glue** → **Glue Studio**
+2. 🟡 **LambdaScraperFiap\_Ingestão** → S3 `raw/`
+3. 🟡 **Lambda\_Start\_Glue\_Job** → **Glue Studio**
 4. 🔵 **Glue ETL** → S3 `refined/` + **Glue Catalog**
 5. 📗 **Athena** (Query & Notebook)
-
----
 
 ## Componentes
 
@@ -70,8 +56,6 @@ Este projeto implementa um pipeline completo para:
 | **Glue Data Catalog**     | Tabela `default.tb_ibov_refined` criada/atualizada      |
 | **AWS Athena**            | Consulta SQL, criação de views e notebooks com gráficos |
 
----
-
 ## Configuração
 
 ### S3 Buckets
@@ -79,26 +63,24 @@ Este projeto implementa um pipeline completo para:
 ```text
 tech-challenge-bovespa/
 ├── raw/       # Parquet raw particionado (date=YYYY-MM-DD)
-└── refined/   # Parquet refinado particionado (date=…/Codigo=…)
+└── refined/   # Parquet refinado particionado (Data=…/Codigo=…)
 ```
 
+### IAM Roles
 
+*(Roles necessárias para Lambda, Glue e Athena com permissões de leitura/escrita em S3 e Glue Catalog.)*
 
----
+### Lambda de Ingestão (Raw)
 
-## Lambda de Ingestão (Raw)
-
-**Função:** `lambda_ingestao_bovespa_raw`\
+**Função:** `LambdaScraperFiap`\
 **Runtime:** Python 3.11\
 **Layer:** `AWSSDKPandas-Python311:7`
 
 **Variáveis de Ambiente:**
 
-| Nome           | Valor                    |
-| -------------- | ------------------------ |
-| `S3_BUCKET`    | `tech-challenge-bovespa` |
-
-**Código (**``**):**
+| Nome       | Valor                    |
+| ---------- | ------------------------ |
+| S3\_BUCKET | `tech-challenge-bovespa` |
 
 ```python
 import os
@@ -215,22 +197,18 @@ def lambda_handler(event, context):
     }
 ```
 
----
-
-## Event Notification
+### Event Notification
 
 No **S3 → Bucket raw → Properties → Event notifications → Create Event Notification**:
 
-- **Name:** `trigger-lambda-glue-job`
+- **Name:** `lambda_start_glue_job`
 - **Event types:** `All object create events`
 - **Prefix:** `raw/`
-- **Destination:** Lambda function `lambda_trigger_glue_job`
+- **Destination:** Lambda function `lambda_start_glue_job`
 
----
+### Lambda Trigger Glue
 
-## Lambda Trigger Glue
-
-**Função:** `lambda_trigger_glue_job`\
+**Função:** `lambda_start_glue_job`\
 **Runtime:** Python 3.11
 
 ```python
@@ -273,77 +251,62 @@ def lambda_handler(event, context):
         }
 ```
 
----
-
-## Glue Studio – ETL Visual
+### Glue Studio – ETL Visual
 
 1. **Source**
+
    - S3 raw (`s3://<bucket>/raw/`), **Recursive**, format **Parquet**, infer schema.
-2. **Aggregate**
-   - Group by: `segment`, `DataCarteira`
-   - Sum(`part`) → `soma_part`
-   - Count(`cod`) → `total_codigo`
-   - Sum(`theoricalQty`) → `soma_qtd_teorica`
-3. **ApplyMapping**
-   - `segment` → `Setor`
-   - `DataCarteira` → `Data`
-   - `soma_part`, `total_codigo`, `soma_qtd_teorica` (tipos ajustados)
-4. **SQL Query**
+
+2. **Transform A: Aggregate**
+
+   - **Fields to group by (optional):** `cod`, `DataCarteira`
+   - **Field to aggregate:** `part` → **sum**
+   - **Field to aggregate:** `theoricalQty` → **sum**
+
+   &#x20;*Visão da tela de configuração do nó Aggregate (Glue Studio).*
+
+3. **Transform B: Change Schema (Apply mapping)**
+
+   - Mapear colunas de acordo com padrão:
+     | Source key          | Target key         | Data type |
+     | ------------------- | ------------------ | --------- |
+     | `cod`               | `codigo`           | string    |
+     | `DataCarteira`      | `data`             | date      |
+     | `sum(part)`         | `soma_part`        | double    |
+     | `sum(theoricalQty)` | `soma_qtd_teorica` | double    |
+
+   &#x20;*Tela de Apply mapping com nomes e tipos ajustados.*
+
+4. **Transform C: SQL Query**
+
    ```sql
    SELECT
-     Setor,
-     Data,
-     soma_part,
-     total_codigo,
-     soma_qtd_teorica,
-     DATEDIFF(CURRENT_DATE(), Data) AS dias_desde_carteira
-   FROM myDataSource;
+   codigo,
+   data               AS data_carteira,
+   soma_part,
+   soma_qtd_teorica,
+   DATEDIFF(current_date(), data) AS dias_desde_carteira
+   FROM myDataSource
    ```
+
 5. **Target**
+
    - S3 refined (`parquet`), partition keys: `Data`, `Codigo`
    - Enable **Create tables in Glue Data Catalog** → Database `default`, Table `tb_ibov_refined`
 
----
+### Athena & Visualizações
 
-## Athena & Visualizações
-
-### Queries de Exemplo
+#### Queries de Exemplo
 
 ```sql
--- 10 primeiros registros\SELECT * FROM default.tb_ibov_refined LIMIT 10;
-
--- Soma total de participação\SELECT SUM(soma_part) AS total_participacao FROM default.tb_ibov_refined;
-
--- Participação por setor
-SELECT setor, SUM(soma_part) AS total_part
-FROM default.tb_ibov_refined
-GROUP BY setor
-ORDER BY total_part DESC;
+-- 10 primeiros registros
+SELECT * FROM default.tb_ibov_refined LIMIT 10;
 ```
 
-### Notebook Spark
-
-```sql
-%%sql
-SELECT
-  Setor,
-  SUM(soma_part) AS total_participacao
-FROM default.tb_ibov_refined
-GROUP BY Setor
-ORDER BY total_participacao DESC
-LIMIT 10;
-```
-
-Clique em **Visualize** (📊) ou use:
+%matplotlib inline
 
 ```python
-df = spark.sql("...sua query...")
-pdf = df.toPandas()
-import matplotlib.pyplot as plt
-plt.figure(figsize=(10,5))
-plt.bar(pdf['Setor'], pdf['total_participacao'])
-%matplot plt
+# Notebook Athena: gerar gráficos com matplotlib
 ```
 
----
 
